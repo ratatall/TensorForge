@@ -1,0 +1,64 @@
+name: Linux compiler validation
+'on':
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  llvm23:
+    name: Ubuntu / LLVM 23 / sanitizers=${{ matrix.sanitizers }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizers: ['OFF', 'ON']
+    env:
+      CC: clang-23
+      CXX: clang++-23
+      ASAN_OPTIONS: detect_leaks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install LLVM 23 and build tools
+        run: bash scripts/ci-install-llvm.sh
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="$(llvm-config-23 --cmakedir)" \
+            -DTENSORFORGE_SANITIZERS=${{ matrix.sanitizers }} 2>&1 | tee configure.log
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel 2 2>&1 | tee build.log
+      - name: Test inventory and full suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build -N | tee inventory.log
+          ctest --test-dir build --output-on-failure 2>&1 | tee tests.log
+      - name: CLI and all-mode JIT verification
+        run: |
+          build/tensorforge check examples/relu_chain.tf
+          build/tensorforge run examples/relu_chain.tf --interpret
+          build/tensorforge run examples/relu_chain.tf --opt --llvm-opt=O2 --verify
+          build/tensorforge emit-llvm examples/relu_chain.tf --opt --llvm-opt=O2 > build/optimized.ll
+          opt-23 -passes=verify -disable-output build/optimized.ll
+          build/tensorforge benchmark examples/relu_chain.tf --iterations 3 --csv build/smoke.csv
+      - name: Preserve failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-llvm23-sanitizers-${{ matrix.sanitizers }}
+          path: |
+            *.log
+            build/Testing/Temporary/
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/*.ll
+            build/*.csv
