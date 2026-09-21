@@ -1,6 +1,6 @@
 # Testing and validation
 
-Local validation used macOS 15.5 arm64, Apple Clang 17, LLVM 23.1.0, and CMake 4.4.3. The suite contains **20 CTest cases**.
+Local validation used macOS 15.5 arm64, Apple Clang 17, LLVM 23.1.0, and CMake 4.4.3. GitHub Actions also passes on Ubuntu 24.04 x86-64 with Clang/LLVM 23, both normally and under ASan/UBSan. The suite contains **20 CTest cases**.
 
 ## Run the tests
 

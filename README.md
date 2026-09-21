@@ -1,5 +1,7 @@
 # TensorForge
 
+[![Linux compiler validation](https://github.com/ratatall/TensorForge/actions/workflows/linux.yml/badge.svg)](https://github.com/ratatall/TensorForge/actions/workflows/linux.yml)
+
 A small C++20 compiler for statically shaped `f32` tensor expressions. It parses a custom language, checks shapes, builds a visible tensor IR, optimizes it, and executes real native code through LLVM ORC JIT.
 
 ```text
@@ -15,7 +17,7 @@ return relu(activations + bias);
 - **Constant folding, dead-code elimination, and elementwise fusion**, plus independently selectable LLVM O2.
 - **20 CTest cases**, including **984 generated-graph differential comparisons** across four JIT configurations, plus multidimensional broadcast checks.
 - **2.92×** on `relu(A * 2 + B)`, N=262,144, versus **TensorForge’s unfused JIT**, with LLVM middle-end passes off; eliminated **2 MiB** of scratch. [Measured evidence](docs/benchmarking.md).
-- **macOS arm64 / LLVM 23:** locally validated. **Ubuntu CI:** workflow configured; remote run pending.
+- Validated on **macOS arm64** and **Ubuntu 24.04 x86-64** with LLVM 23, including ASan/UBSan on Linux.
 
 ```bash
 scripts/build.sh Release build
@@ -50,7 +52,7 @@ flowchart LR
 
 ## Build and test
 
-Tested locally on **macOS 15.5, arm64, Apple Clang 17.0.0, LLVM 23.1.0, CMake 4.4.3**. LLVM 23 is the initial supported API version; other LLVM major versions are rejected at configuration time. The Ubuntu 24.04/LLVM 23 workflow is configured, with remote execution pending. Linux instructions below are setup guidance, not a claim of Linux validation. See [CI status](docs/ci.md).
+Tested locally on **macOS 15.5, arm64, Apple Clang 17.0.0, LLVM 23.1.0, CMake 4.4.3**. GitHub Actions validates Ubuntu 24.04 x86-64 with Clang/LLVM 23 in ordinary and ASan/UBSan configurations. Other LLVM major versions are rejected at configuration time. See [CI status](docs/ci.md).
 
 ### macOS
 
