@@ -63,6 +63,19 @@ Tensor interpret(const Module &module, const Inputs &inputs) {
             continue;
         }
         result.resize(op.type.elements());
+        if (op.opcode == Opcode::ReduceSum) {
+            const auto arg = op.operands.at(0);
+            const auto &inputType = module.operations[arg].type;
+            for (std::size_t outputIndex = 0; outputIndex < result.size(); ++outputIndex) {
+                float accumulator = 0.0f;
+                for (std::size_t reductionIndex = 0;
+                     reductionIndex < inputType.shape[op.reductionAxis]; ++reductionIndex)
+                    accumulator += values.at(arg).at(reductionInputIndex(
+                        outputIndex, reductionIndex, inputType, op.reductionAxis));
+                result[outputIndex] = accumulator;
+            }
+            continue;
+        }
         for (std::size_t i = 0; i < result.size(); ++i) {
             auto get = [&](std::size_t operand) {
                 const auto arg = op.operands.at(operand);
@@ -79,6 +92,8 @@ Tensor interpret(const Module &module, const Inputs &inputs) {
             case Opcode::Relu:
                 result[i] = applyRelu(a);
                 break;
+            case Opcode::ReduceSum:
+                throw std::logic_error("interpreter: nested reduction dispatch");
             default:
                 throw std::logic_error("interpreter: invalid computation");
             }

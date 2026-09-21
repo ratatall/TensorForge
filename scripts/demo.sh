@@ -9,7 +9,9 @@ cat examples/relu_chain.tf
 "$cli" dump-ir examples/relu_chain.tf --opt
 "$cli" dump-ir examples/scalar_folding.tf --opt
 "$cli" dump-ir examples/dead_code.tf --opt
+"$cli" dump-loop-ir examples/reduction.tf --opt
 "$cli" emit-llvm examples/relu_chain.tf --opt
 "$cli" emit-llvm examples/relu_chain.tf --opt --llvm-opt=O2
 "$cli" run examples/relu_chain.tf --opt --llvm-opt=O2 --verify
+"$cli" run examples/reduction.tf --llvm-opt=O2 --verify
 "$cli" benchmark examples/relu_chain.tf --iterations 21

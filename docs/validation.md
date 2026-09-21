@@ -1,6 +1,6 @@
 # Testing and validation
 
-Local validation used macOS 15.5 arm64, Apple Clang 17, LLVM 23.1.0, and CMake 4.4.3. GitHub Actions also passes on Ubuntu 24.04 x86-64 with Clang/LLVM 23, both normally and under ASan/UBSan. The suite contains **20 CTest cases**.
+Local validation used macOS 15.5 arm64, Apple Clang 17, LLVM 23.1.0, and CMake 4.4.3. GitHub Actions also covers Ubuntu 24.04 x86-64 with Clang/LLVM 23, both normally and under ASan/UBSan. The suite contains **22 CTest cases**.
 
 ## Run the tests
 
@@ -15,9 +15,9 @@ For sanitizer coverage, configure CMake with `-DTENSORFORGE_SANITIZERS=ON` and r
 
 ## Coverage
 
-The suite covers lexical analysis, parsing, multidimensional broadcasting, semantic checks, IR verification, optimization passes, code generation, differential execution, resource limits, runtime input validation, examples, negative CLI fixtures, CLI options, and benchmark output.
+The suite covers lexical analysis, parsing, multidimensional broadcasting, reductions, Tensor and Loop IR verification, optimization passes, code generation, differential execution, resource limits, runtime input validation, examples, negative CLI fixtures, CLI options, and benchmark output.
 
-Differential tests perform **984 comparisons**: 60 fixed/generated graphs across four seeds and four JIT configurations, plus six shared DAGs across four configurations. Additional cases cover scalar broadcasting, dead code, constant folding, NaN/infinity/signed zero, malformed IR, overflow rejection, and mismatch diagnostics. LLVM functions and modules are verified before execution and after optional O2 optimization.
+Differential tests perform **1,000 comparisons**: 60 fixed/generated elementwise graphs across four seeds and four JIT configurations, six shared DAGs across four configurations, and four reduction graphs across four configurations. Additional cases cover both reduction axes, scalar reduction results, reduction followed by broadcasting, scalar broadcasting, dead code, constant folding, NaN/infinity/signed zero, malformed Tensor/Loop IR, overflow rejection, and mismatch diagnostics. LLVM functions and modules are verified before execution and after optional O2 optimization.
 
 Release benchmark smoke tests validate finite timing data, configuration fields, loop and scratch counts, checksums, and verification status. The Debug case checks the Release-only benchmark requirement. Test assertions remain active in Release builds.
 

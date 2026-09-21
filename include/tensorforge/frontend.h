@@ -31,6 +31,7 @@ enum class TokenKind {
     F32,
     Tensor,
     Relu,
+    Sum,
     Colon,
     Semicolon,
     Equal,
@@ -75,9 +76,13 @@ struct Binary {
 struct Relu {
     ExprPtr argument;
 };
+struct ReduceSum {
+    ExprPtr argument;
+    std::size_t axis = 0;
+};
 struct Expr {
     Location location;
-    std::variant<Identifier, Number, Binary, Relu> node;
+    std::variant<Identifier, Number, Binary, Relu, ReduceSum> node;
 };
 struct InputDecl {
     Location location;

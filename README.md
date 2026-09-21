@@ -2,7 +2,7 @@
 
 [![Linux compiler validation](https://github.com/ratatall/TensorForge/actions/workflows/linux.yml/badge.svg)](https://github.com/ratatall/TensorForge/actions/workflows/linux.yml)
 
-A small C++20 compiler for statically shaped `f32` tensor expressions. It parses a custom language, checks shapes, builds a visible tensor IR, optimizes it, and executes real native code through LLVM ORC JIT.
+A small C++20 compiler for statically shaped `f32` tensor expressions. It parses a custom language, checks shapes, builds visible tensor and loop IRs, optimizes them, and executes real native code through LLVM ORC JIT.
 
 ```text
 input activations: tensor<32,128>;
@@ -14,8 +14,9 @@ return relu(activations + bias);
 
 - Complete **C++20 frontend → typed tensor IR → LLVM → ORC JIT** pipeline.
 - Static rank-1 through rank-8 tensors with NumPy-style trailing-dimension broadcasting.
+- Axis-based sum reductions lowered to explicit output and reduction loops.
 - **Constant folding, dead-code elimination, and elementwise fusion**, plus independently selectable LLVM O2.
-- **20 CTest cases**, including **984 generated-graph differential comparisons** across four JIT configurations, plus multidimensional broadcast checks.
+- **22 CTest cases**, including **1,000 differential comparisons** across four JIT configurations, plus multidimensional broadcast and reduction checks.
 - **2.92×** on `relu(A * 2 + B)`, N=262,144, versus **TensorForge’s unfused JIT**, with LLVM middle-end passes off; eliminated **2 MiB** of scratch. [Measured evidence](docs/benchmarking.md).
 - Validated on **macOS arm64** and **Ubuntu 24.04 x86-64** with LLVM 23, including ASan/UBSan on Linux.
 
@@ -40,10 +41,10 @@ flowchart LR
     A --> I[Typed tensor IR]
     I --> R[Reference interpreter]
     I --> O[Constant folding / DCE / fusion]
-    I --> U[Unfused LLVM lowering]
-    O --> F[Fused LLVM lowering]
+    I --> LI[Explicit Loop IR]
+    O --> LI
+    LI --> U[LLVM lowering]
     U --> V[LLVM verification]
-    F --> V
     V --> M[Optional LLVM O2 / verify again]
     M --> J[ORC LLJIT / native CPU]
     J --> C[Compare with interpreter]
@@ -104,13 +105,14 @@ Sanitizers instrument TensorForge host code; the prebuilt LLVM library and gener
 
 ## Language and CLI
 
-Supported: scalar `f32` inputs and literals, rank-1 through rank-8 tensors such as `tensor<2,3>`, `let`, one final `return`, `+`, `*`, `relu`, parentheses, NumPy-style trailing-dimension broadcasting, and `//` comments. Negative numeric literals and decimal exponents are supported. All identifiers must be declared before use. A scalar return uses one output element.
+Supported: scalar `f32` inputs and literals, rank-1 through rank-8 tensors such as `tensor<2,3>`, `let`, one final `return`, `+`, `*`, `relu`, `sum(expression, axis)`, parentheses, NumPy-style trailing-dimension broadcasting, and `//` comments. Negative numeric literals and decimal exponents are supported. All identifiers must be declared before use. Reducing the only tensor axis produces a scalar.
 
 ```bash
 build/tensorforge check examples/relu_chain.tf
 build/tensorforge dump-ast examples/relu_chain.tf
 build/tensorforge dump-ir examples/relu_chain.tf
 build/tensorforge dump-ir examples/relu_chain.tf --opt --trace-passes
+build/tensorforge dump-loop-ir examples/reduction.tf --opt
 build/tensorforge emit-llvm examples/relu_chain.tf --opt --llvm-opt=O2
 build/tensorforge run examples/relu_chain.tf --seed 42 --opt --verify
 build/tensorforge run examples/relu_chain.tf --interpret
@@ -179,6 +181,15 @@ module {
 }
 ```
 
+Loop IR for `examples/reduction.tf` makes the two iteration domains explicit:
+
+```text
+loop_module {
+  loop0 elementwise [%1] over tensor<2x4xf32>
+  loop1 reduction [%2] over tensor<2xf32> axis=1 extent=4
+}
+```
+
 The ReLU chain changes from three LLVM loops and two temporary buffers to one loop with no tensor scratch space. Within its generated loop, LLVM instructions include:
 
 ```llvm
@@ -218,6 +229,7 @@ With LLVM middle-end optimization held at none, custom fusion reduced median exe
 | Locations, tokens, owned AST, types | `include/tensorforge/frontend.h` | Data structures and ownership |
 | Lexer, recursive-descent parser, AST printer | `src/frontend.cpp` | Precedence and located errors |
 | Shape checking, IR lowering, verifier, three passes | `src/ir.cpp` | SSA operands, liveness, scheduling |
+| Loop IR | `src/loop_ir.cpp` | Explicit scalar, elementwise, copy, fused, and reduction schedules |
 | Reference execution, inputs, tolerance | `src/interpreter.cpp` | Broadcasting and numeric oracle |
 | LLVM loops, verification, ORC ownership | `src/codegen.cpp` | Lowering, PHI nodes, runtime ABI |
 | CLI | `src/main.cpp` | Pipeline orchestration and failures |
@@ -232,7 +244,7 @@ Static shapes allow storage and loop bounds to be planned before execution. Tens
 
 ## Limits and future work
 
-Static `f32` tensors only. There are no reductions, dynamic shapes, user input files, autodiff, GPU support, AOT emission, or hand-written SIMD intrinsics. There is one pure returned value and no control flow in the source language. Rank is capped at 8 and each tensor at 16,777,216 elements; expression nodes are capped at 2,048 and nesting at 128. Unoptimized scratch, generated input storage, and interpreter materializations each have a preflight 1 GiB budget. These limits are not a complete resource sandbox. LLVM 23 is the only supported backend version.
+Static `f32` tensors only. Reductions currently support sum over one compile-time axis; there are no dynamic shapes, user input files, autodiff, GPU support, AOT emission, or hand-written SIMD intrinsics. There is one pure returned value and no source-level control flow. Rank is capped at 8 and each tensor at 16,777,216 elements; expression nodes are capped at 2,048 and nesting at 128. Unoptimized scratch, generated input storage, and interpreter materializations each have a preflight 1 GiB budget. These limits are not a complete resource sandbox. LLVM 23 is the only supported backend version.
 
 Future work includes broader platform coverage, target-aware vectorization, and analysis of register pressure on larger expression DAGs.
 

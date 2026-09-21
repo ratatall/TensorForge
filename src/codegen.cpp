@@ -1,4 +1,5 @@
 #include "tensorforge/codegen.h"
+#include "tensorforge/loop_ir.h"
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
@@ -26,6 +27,7 @@ template <class T> T unwrap(llvm::Expected<T> value) {
 }
 class Generator {
     const Module &ir_;
+    LoopModule loopIR_;
     llvm::LLVMContext &context_;
     llvm::Module &module_;
     llvm::IRBuilder<> builder_;
@@ -93,17 +95,72 @@ class Generator {
         auto *index = builder_.CreatePHI(builder_.getInt64Ty(), 2, "i");
         index->addIncoming(builder_.getInt64(0), before);
         body(index);
+        auto *latch = builder_.GetInsertBlock();
         auto *next = builder_.CreateAdd(index, builder_.getInt64(1), "next");
-        index->addIncoming(next, block);
+        index->addIncoming(next, latch);
         builder_.CreateCondBr(builder_.CreateICmpULT(next, builder_.getInt64(extent)), block,
                               after);
         builder_.SetInsertPoint(after);
     }
+    llvm::Value *reductionInputOffset(llvm::Value *outputIndex, const Type &inputType,
+                                      std::size_t axis) {
+        Type outputType;
+        if (!reductionType(inputType, axis, outputType))
+            throw std::logic_error("codegen: invalid reduction type");
+        auto *remaining = outputIndex;
+        llvm::Value *inputIndex = builder_.getInt64(0);
+        for (std::size_t outputAxis = outputType.shape.size(); outputAxis-- > 0;) {
+            auto *dimension = builder_.getInt64(outputType.shape[outputAxis]);
+            auto *coordinate = builder_.CreateURem(remaining, dimension, "reduce.coordinate");
+            remaining = builder_.CreateUDiv(remaining, dimension, "reduce.remaining");
+            const auto inputAxis = outputAxis < axis ? outputAxis : outputAxis + 1;
+            std::size_t stride = 1;
+            for (std::size_t i = inputAxis + 1; i < inputType.shape.size(); ++i)
+                stride *= inputType.shape[i];
+            inputIndex = builder_.CreateAdd(
+                inputIndex,
+                builder_.CreateMul(coordinate, builder_.getInt64(stride), "reduce.offset"),
+                "reduce.base");
+        }
+        return inputIndex;
+    }
+    llvm::Value *reduce(const Operation &op, llvm::Value *outputIndex) {
+        ++stats_.loops;
+        const auto arg = op.operands.at(0);
+        const auto &inputType = ir_.operations[arg].type;
+        auto *base = reductionInputOffset(outputIndex, inputType, op.reductionAxis);
+        std::size_t stride = 1;
+        for (std::size_t i = op.reductionAxis + 1; i < inputType.shape.size(); ++i)
+            stride *= inputType.shape[i];
+        auto *before = builder_.GetInsertBlock();
+        auto *block = llvm::BasicBlock::Create(context_, "reduce", function_);
+        auto *after = llvm::BasicBlock::Create(context_, "reduce.after", function_);
+        builder_.CreateBr(block);
+        builder_.SetInsertPoint(block);
+        auto *index = builder_.CreatePHI(builder_.getInt64Ty(), 2, "r");
+        auto *accumulator = builder_.CreatePHI(f32(), 2, "sum");
+        index->addIncoming(builder_.getInt64(0), before);
+        accumulator->addIncoming(llvm::ConstantFP::get(f32(), 0.0), before);
+        auto *inputIndex = builder_.CreateAdd(
+            base, builder_.CreateMul(index, builder_.getInt64(stride), "reduce.stride"),
+            "reduce.index");
+        auto *nextAccumulator =
+            builder_.CreateFAdd(accumulator, load(arg, inputIndex, inputType), "sum.next");
+        auto *nextIndex = builder_.CreateAdd(index, builder_.getInt64(1), "r.next");
+        auto *latch = builder_.GetInsertBlock();
+        index->addIncoming(nextIndex, latch);
+        accumulator->addIncoming(nextAccumulator, latch);
+        builder_.CreateCondBr(
+            builder_.CreateICmpULT(nextIndex, builder_.getInt64(inputType.shape[op.reductionAxis])),
+            block, after);
+        builder_.SetInsertPoint(after);
+        return nextAccumulator;
+    }
 
   public:
     Generator(const Module &ir, llvm::LLVMContext &context, llvm::Module &module)
-        : ir_(ir), context_(context), module_(module), builder_(context),
-          pointers_(ir.operations.size()), scalars_(ir.operations.size()) {}
+        : ir_(ir), loopIR_(lowerToLoopIR(ir)), context_(context), module_(module),
+          builder_(context), pointers_(ir.operations.size()), scalars_(ir.operations.size()) {}
     LoweringStats run() {
         auto *ptr = llvm::PointerType::getUnqual(context_);
         auto *signature = llvm::FunctionType::get(builder_.getVoidTy(), {ptr, ptr, ptr}, false);
@@ -143,43 +200,52 @@ class Generator {
             const auto &op = ir_.operations[id];
             if (!op.alive)
                 continue;
-            if (op.type.scalar()) {
-                if (op.opcode == Opcode::Input)
-                    scalars_[id] = builder_.CreateLoad(f32(), pointers_[id], op.name + ".scalar");
-                else if (op.opcode == Opcode::Constant)
-                    scalars_[id] = llvm::ConstantFP::get(f32(), op.constant);
-                else
-                    scalars_[id] =
-                        operation(op, [&](ValueId arg, const Type &) { return scalars_.at(arg); });
-            } else if (!fused && op.opcode != Opcode::Input) {
+            if (op.type.scalar() && op.opcode == Opcode::Input)
+                scalars_[id] = builder_.CreateLoad(f32(), pointers_[id], op.name + ".scalar");
+            else if (op.opcode == Opcode::Constant)
+                scalars_[id] = llvm::ConstantFP::get(f32(), op.constant);
+        }
+        const auto &result = ir_.operations[ir_.result];
+        for (const auto &nest : loopIR_.nests) {
+            const auto id = nest.operations.front();
+            const auto &op = ir_.operations[id];
+            if (nest.kind == LoopKind::Scalar) {
+                scalars_[id] =
+                    operation(op, [&](ValueId arg, const Type &) { return scalars_.at(arg); });
+            } else if (nest.kind == LoopKind::Elementwise) {
                 loop(op.type.elements(), [&](llvm::Value *index) {
                     auto *value = operation(
                         op, [&](ValueId arg, const Type &type) { return load(arg, index, type); });
                     builder_.CreateStore(value, offset(pointers_[id], index));
                 });
+            } else if (nest.kind == LoopKind::Reduction) {
+                if (op.type.scalar())
+                    scalars_[id] = reduce(op, builder_.getInt64(0));
+                else
+                    loop(op.type.elements(), [&](llvm::Value *index) {
+                        builder_.CreateStore(reduce(op, index), offset(pointers_[id], index));
+                    });
+            } else if (nest.kind == LoopKind::Copy) {
+                loop(op.type.elements(), [&](llvm::Value *index) {
+                    builder_.CreateStore(load(id, index, op.type), offset(output_, index));
+                });
+            } else {
+                loop(result.type.elements(), [&](llvm::Value *index) {
+                    auto values = scalars_;
+                    // Cache DAG values in SSA registers, including shared subexpressions.
+                    auto get = [&](ValueId arg, const Type &type) {
+                        if (!values[arg])
+                            values[arg] = load(arg, index, type);
+                        return values[arg];
+                    };
+                    for (auto fusedId : nest.operations)
+                        values[fusedId] = operation(ir_.operations[fusedId], get);
+                    builder_.CreateStore(values.at(ir_.result), offset(output_, index));
+                });
             }
         }
-        const auto &result = ir_.operations[ir_.result];
-        if (fused) {
-            loop(result.type.elements(), [&](llvm::Value *index) {
-                auto values = scalars_;
-                // Cache DAG values in SSA registers, including shared subexpressions.
-                auto get = [&](ValueId arg, const Type &type) {
-                    if (!values[arg])
-                        values[arg] = load(arg, index, type);
-                    return values[arg];
-                };
-                for (auto id : ir_.fusedRegion)
-                    values[id] = operation(ir_.operations[id], get);
-                builder_.CreateStore(values.at(ir_.result), offset(output_, index));
-            });
-        } else if (result.type.scalar())
+        if (result.type.scalar())
             builder_.CreateStore(scalars_.at(ir_.result), output_);
-        else if (result.opcode == Opcode::Input) {
-            loop(result.type.elements(), [&](llvm::Value *index) {
-                builder_.CreateStore(load(ir_.result, index, result.type), offset(output_, index));
-            });
-        }
         builder_.CreateRetVoid();
         std::string message;
         llvm::raw_string_ostream errors(message);

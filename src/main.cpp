@@ -1,4 +1,5 @@
 #include "tensorforge/benchmark.h"
+#include "tensorforge/loop_ir.h"
 #include <charconv>
 #include <fstream>
 #include <iostream>
@@ -14,9 +15,10 @@ std::uint32_t integer(const std::string &text) {
     return value;
 }
 void usage() {
-    std::cout << "TensorForge 0.2.0\n"
+    std::cout << "TensorForge 0.3.0\n"
                  "  tensorforge check FILE\n  tensorforge dump-ast FILE\n"
                  "  tensorforge dump-ir FILE [--opt] [--trace-passes]\n"
+                 "  tensorforge dump-loop-ir FILE [--opt]\n"
                  "  tensorforge emit-llvm FILE [--opt] [--llvm-opt=none|O2]\n"
                  "  tensorforge run FILE [--opt] [--seed N] [--verify] [--interpret] "
                  "[--llvm-opt=none|O2]\n"
@@ -36,7 +38,8 @@ int main(int argc, char **argv) {
         }
         const std::string command = argv[1], path = argv[2];
         if (command != "check" && command != "dump-ast" && command != "dump-ir" &&
-            command != "emit-llvm" && command != "run" && command != "benchmark")
+            command != "dump-loop-ir" && command != "emit-llvm" && command != "run" &&
+            command != "benchmark")
             throw std::invalid_argument("unknown command: " + command);
         bool opt = false, verify = false, interpreter = false, trace = false;
         LLVMOptimization llvmOpt = LLVMOptimization::None;
@@ -57,8 +60,8 @@ int main(int argc, char **argv) {
                     llvmOpt = LLVMOptimization::O2;
                 else
                     throw std::invalid_argument("--llvm-opt must be none or O2");
-            } else if (flag == "--opt" &&
-                       (command == "dump-ir" || command == "emit-llvm" || command == "run"))
+            } else if (flag == "--opt" && (command == "dump-ir" || command == "dump-loop-ir" ||
+                                           command == "emit-llvm" || command == "run"))
                 opt = true;
             else if (flag == "--verify" && command == "run")
                 verify = true;
@@ -106,6 +109,11 @@ int main(int argc, char **argv) {
             PassManager().run(ir, trace ? &std::cerr : nullptr);
         if (command == "dump-ir") {
             std::cout << printIR(ir);
+            return 0;
+        }
+        if (command == "dump-loop-ir") {
+            const auto loops = lowerToLoopIR(ir);
+            std::cout << printLoopIR(ir, loops);
             return 0;
         }
         if (command == "emit-llvm") {

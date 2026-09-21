@@ -1,4 +1,5 @@
 #include "tensorforge/codegen.h"
+#include "tensorforge/loop_ir.h"
 #include <cmath>
 #include <functional>
 #include <iostream>
@@ -69,6 +70,11 @@ void parserTests() {
     expect(add.op == '+' && std::get<Binary>(add.right->node).op == '*', "operator precedence");
     expect(interpret(lower("return (2 + 3) * 4;"), {}) == Tensor{20}, "parentheses");
     expect(interpret(lower("return relu(relu(-2));"), {}) == Tensor{0}, "nested relu");
+    auto reductionAst = parse({"sum.tf", "input A: tensor<2,3>; return sum(A, 1);"});
+    expect(std::get<ReduceSum>(reductionAst.result.expression->node).axis == 1,
+           "reduction axis in AST");
+    expect(printAST(reductionAst).find("Sum axis=1") != std::string::npos,
+           "reduction visible in AST");
     expect(printAST(ast) == "Program @1:1\n  Return @1:1\n    Binary + @1:8\n      Number 2 @1:8\n "
                             "     Binary * @1:12\n        Number 3 @1:12\n        Number 4 @1:16\n",
            "deterministic AST");
@@ -78,6 +84,7 @@ void parserTests() {
     rejects("let x = 2;", "final return");
     rejects("return -relu(1);", "numeric literal");
     rejects("return 1e100;", "finite f32 range");
+    rejects("input A: tensor<2>; return sum(A, 1.5);", "nonnegative integer");
     rejects("return " + std::string(129, '(') + "1" + std::string(129, ')') + ";",
             "nesting exceeds");
 }
@@ -105,6 +112,12 @@ void semanticTests() {
            "trailing-dimension broadcasting");
     auto outer = lower("input A: tensor<2,1>; input B: tensor<1,3>; return A*B;");
     expect(outer.operations[outer.result].type == Type({2, 3}), "two-axis broadcasting");
+    expect(lower("input A: tensor<2,3,4>; return sum(A,1);").operations.back().type == Type({2, 4}),
+           "reduction removes selected axis");
+    expect(lower("input A: tensor<4>; return sum(A,0);").operations.back().type.scalar(),
+           "rank-one reduction produces scalar");
+    rejects("input s: f32; return sum(s,0);", "invalid for f32");
+    rejects("input A: tensor<2,3>; return sum(A,2);", "axis 2");
 }
 void irTests() {
     auto module = lower("input A: tensor<4>; return A * 2;");
@@ -122,6 +135,30 @@ void irTests() {
     }
     expect(caught, "IR rejects forward references");
     expect(module.inputs[0].name == "A", "ABI input order");
+    auto reduction = lower("input A: tensor<2,3>; return sum(A,1);");
+    expect(printIR(reduction).find("reduce_sum axis=1 %0 : tensor<2xf32>") != std::string::npos,
+           "reduction visible in Tensor IR");
+}
+void loopIRTests() {
+    auto module = lower("input A: tensor<2,3>; let scaled=A*2; return sum(scaled,1);");
+    const auto loops = lowerToLoopIR(module);
+    expect(loops.nests.size() == 2, "elementwise and reduction loop nests");
+    expect(loops.nests[0].kind == LoopKind::Elementwise &&
+               loops.nests[1].kind == LoopKind::Reduction,
+           "Loop IR preserves lowering order");
+    const auto text = printLoopIR(module, loops);
+    expect(text.find("elementwise [%2]") != std::string::npos &&
+               text.find("reduction [%3] over tensor<2xf32> axis=1 extent=3") != std::string::npos,
+           "readable Loop IR");
+    auto broken = loops;
+    broken.nests.pop_back();
+    bool rejected = false;
+    try {
+        validateLoopIR(module, broken);
+    } catch (const std::logic_error &error) {
+        rejected = std::string(error.what()).find("schedule") != std::string::npos;
+    }
+    expect(rejected, "Loop IR verifier rejects an incomplete schedule");
 }
 void passTests() {
     auto module =
@@ -150,6 +187,9 @@ void passTests() {
     std::ostringstream trace;
     PassManager().run(original, &trace);
     expect(trace.str().find("after elementwise-fusion") != std::string::npos, "pass trace");
+    auto reduction = lower("input A: tensor<2,3>; return sum(relu(A),1);");
+    PassManager().run(reduction);
+    expect(reduction.fusedRegion.empty(), "reductions keep elementwise fusion conservative");
 }
 void checkBoth(const Module &module, const Inputs &inputs) {
     const auto oracle = interpret(module, inputs);
@@ -217,6 +257,31 @@ void codegenTests() {
     expect(before.find("fmul") != std::string::npos && after.find("fmul") == std::string::npos,
            "O2 runs and emitted IR reflects it");
     checkBoth(simplify, generateInputs(simplify, 3));
+    auto rows = lower("input A: tensor<2,3>; return sum(A,1);");
+    Inputs matrix{{1, 2, 3, 4, 5, 6}};
+    expect(interpret(rows, matrix) == Tensor({6, 15}), "row reduction oracle");
+    const auto rowStats = Executable(rows).stats();
+    expect(rowStats.loops == 2 && rowStats.scratchElements == 0,
+           "reduction lowers to output and reduction loops without scratch");
+    checkBoth(rows, matrix);
+    auto columns = lower("input A: tensor<2,3>; return sum(A,0);");
+    expect(interpret(columns, matrix) == Tensor({5, 7, 9}), "column reduction oracle");
+    checkBoth(columns, matrix);
+    auto scalarSum = lower("input x: tensor<4>; return sum(x,0)*2;");
+    expect(interpret(scalarSum, {{1, 2, 3, 4}}) == Tensor({20}), "scalar reduction result");
+    checkBoth(scalarSum, {{1, 2, 3, 4}});
+    auto nestedSum = lower("input A: tensor<2,3>; return sum(sum(A,1),0);");
+    expect(interpret(nestedSum, matrix) == Tensor({21}), "nested reductions");
+    checkBoth(nestedSum, matrix);
+    auto reduceThenBroadcast =
+        lower("input A: tensor<2,3>; input bias: tensor<2>; return sum(relu(A),1)+bias;");
+    Inputs reductionInputs{{-1, 2, 3, 4, -5, 6}, {10, 20}};
+    expect(interpret(reduceThenBroadcast, reductionInputs) == Tensor({15, 30}),
+           "reduction composed with elementwise operation");
+    const auto mixedStats = Executable(reduceThenBroadcast).stats();
+    expect(mixedStats.loops == 4 && mixedStats.scratchElements == 8,
+           "mixed elementwise/reduction Loop IR structure");
+    checkBoth(reduceThenBroadcast, reductionInputs);
     bool invalid = false;
     try {
         plain.run({});
@@ -292,6 +357,9 @@ void resourceTests() {
     invalid = lower("input x: tensor<4>; return x*2;");
     invalid.operations.back().operands.clear();
     throwsWith<std::logic_error>([&] { validateIR(invalid); }, "operand count");
+    invalid = lower("input x: tensor<4>; return sum(x,0);");
+    invalid.operations.back().reductionAxis = 1;
+    throwsWith<std::logic_error>([&] { validateIR(invalid); }, "reduction shape or axis");
     invalid = lower("input x: tensor<4>; return relu(x*2);");
     PassManager().run(invalid);
     invalid.fusedRegion.pop_back();
@@ -396,6 +464,13 @@ void differentialTests() {
         checkBoth(lower(prefix + "let v = A * s; return relu(v * v + v + B);"),
                   generateInputs(lower(prefix + "return A;"), 19));
     }
+    for (const auto &source :
+         {"input A: tensor<2,3>; return sum(A,0);", "input A: tensor<2,3>; return sum(A,1);",
+          "input A: tensor<2,3,4>; return sum(relu(A*0.5),1);",
+          "input A: tensor<4,3>; input b: tensor<4>; return sum(A,1)+b;"}) {
+        auto module = lower(source);
+        checkBoth(module, generateInputs(module, 77));
+    }
 }
 } // namespace
 int main(int argc, char **argv) {
@@ -411,6 +486,8 @@ int main(int argc, char **argv) {
             semanticTests();
         else if (group == "ir")
             irTests();
+        else if (group == "loop-ir")
+            loopIRTests();
         else if (group == "passes")
             passTests();
         else if (group == "codegen")

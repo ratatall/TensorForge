@@ -7,8 +7,9 @@ TensorForge separates tensor meaning from low-level execution. The public model 
 3. `Analyzer` in `src/ir.cpp` checks declaration order, one namespace, and shapes while constructing typed IR. This combines semantic analysis and IR building in one walk. No partially analyzed module escapes on failure.
 4. IR operations are stored in definition order. Operand indices always refer backward; every value has a type. The return is a module field rather than a value-producing operation. `validateIR` checks the contract before execution and after each pass.
 5. `PassManager` runs constant folding, DCE, and fusion scheduling. The CLI retains original IR for the interpreter and copies it before optimizing.
-6. `Generator` in `src/codegen.cpp` emits a function, verifies it and its module, optionally runs standard LLVM O2, verifies again, and hands ownership to ORC. `Executable` owns LLJIT for at least as long as its callable address is used.
-7. `src/main.cpp` converts located diagnostics and internal/runtime exceptions into nonzero exit codes. LLVM `Error` and `Expected` are always consumed and converted to readable exceptions at the boundary.
+6. `src/loop_ir.cpp` lowers verified Tensor IR to an explicit ordered schedule of scalar computations, elementwise loops, copies, fused loops, and nested reductions. Its verifier reconstructs the legal schedule from Tensor IR and rejects incomplete or reordered plans.
+7. `Generator` in `src/codegen.cpp` consumes Loop IR, emits a function, verifies it and its module, optionally runs standard LLVM O2, verifies again, and hands ownership to ORC. `Executable` owns LLJIT for at least as long as its callable address is used.
+8. `src/main.cpp` converts located diagnostics and internal/runtime exceptions into nonzero exit codes. LLVM `Error` and `Expected` are always consumed and converted to readable exceptions at the boundary.
 
 ## Runtime ABI
 
@@ -32,6 +33,8 @@ The third pointer is a deliberate adjustment to the suggested two-pointer ABI. I
 Unfused: assign an output/scratch pointer to each live tensor computation, generate one flattened row-major loop per tensor operation, and load predecessor tensors from their buffers. Broadcast indices are derived from the consumer's flat index without materializing expanded tensors. The return computation writes directly to output; intermediate values have distinct scratch slices. A directly returned tensor input gets a copy loop. Scalars remain LLVM SSA values and are computed once, not per lane.
 
 Fused: consume the explicit topological schedule in one output loop when all tensor computations have the returned shape. Values produced during the current lane live in an LLVM SSA cache. A shared DAG node is computed once per lane even if several users read it. Scalar computations precede the loop. Broadcast input loads are indexed and cached per output lane. No tensor intermediates are materialized. Mixed-shape intermediate graphs remain on the correct unfused path rather than duplicating smaller computations.
+
+Reduction: generate one loop over result elements and a nested loop over the selected input axis. Row-major index reconstruction maps each result coordinate and reduction coordinate back to the source tensor without transposing or expanding it. Rank-one reductions produce an LLVM scalar that later scalar or tensor operations can consume. The current fusion pass remains conservative when a reduction is live, so elementwise producers are materialized before reduction rather than duplicated or illegally reordered.
 
 All paths use the same host target and LLVM backend `CodeGenOptLevel::Default`. The LLVM middle-end selector defaults to `none`; `O2` invokes the standard PassBuilder per-module pipeline with the host TargetMachine and registered analysis managers. LLVM performs instruction selection/register allocation and builder-level constant folding in either case. TensorForge owns the measured change in loop count and scratch traffic; it does not claim every machine-level optimization as its own.
 

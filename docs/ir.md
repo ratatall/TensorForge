@@ -9,6 +9,7 @@ A `Module` owns `operations`, the stable `inputs` ABI table, a returned `ValueId
 | `add` | left, right | broadcast-compatible type |
 | `multiply` | left, right | broadcast-compatible type |
 | `relu` | argument | same type |
+| `reduce_sum` | argument, compile-time axis attribute | input type with that axis removed |
 
 A `let` is a symbol-table alias for an existing value, not a copy operation. There are no mutation, blocks, branches, or PHI nodes at this level. It is SSA-like because each ID is defined once and every use refers to a prior definition. LLVM PHI nodes appear later to implement loops.
 
@@ -27,5 +28,7 @@ This is an explicit lowering schedule over the existing expressions. Fusion does
 DCE invalidates the schedule and reports that invalidation as a change, so it must run before fusion. The default pipeline ends with fusion; no final DCE is needed because scheduling introduces no new values. Callers modifying an already scheduled graph must rebuild its schedule. Stable IDs avoid dangling references during rewrites, but are not a general-purpose mutable IR framework.
 
 Inspect with `tensorforge dump-ir FILE --opt --trace-passes`: the final IR goes to stdout and pass snapshots go to stderr. The interpreter ignores the schedule and evaluates live operations individually, so schedule annotations cannot silently turn the oracle into a fused execution path.
+
+Tensor IR then lowers to the separate [Loop IR](loop-ir.md), which makes execution order and iteration structure explicit before LLVM construction.
 
 Each public pass validates its incoming IR. Fusion invoked without DCE refuses a region whose final computation is not the returned value; the normal pipeline still runs DCE first.

@@ -41,7 +41,7 @@ Fusion is a schedule, `fusedRegion`, over the existing SSA-like values. The code
 
 Expected effect: reduce full-array passes and intermediate memory traffic. A three-op ReLU chain uses three loops and two scratch tensors before fusion, one loop and zero scratch tensors after. A single operation also receives a one-op schedule but has no intermediate storage to eliminate; its timing should be nearly unchanged.
 
-The design does not support reductions, reshapes, matrix multiplication, cross-lane dependencies, side effects, or differently shaped live regions. Those would need new legality and scheduling rules. Large DAGs can increase register pressure; removing scratch does not guarantee a speedup on every target.
+The fusion pass does not cross reductions or support reshapes, matrix multiplication, other cross-lane dependencies, side effects, or differently shaped live regions. Sum reductions lower through separate Loop IR nests; fusing a producer into one would need new legality and scheduling rules. Large DAGs can increase register pressure; removing scratch does not guarantee a speedup on every target.
 
 Tests inspect the schedule and LLVM loop/scratch structure, then compare original and optimized execution across fixed and generated expression trees, several shapes/seeds, shared values, broadcasting, and ReLU edge cases. The primary custom-fusion comparison holds LLVM middle-end optimization at none. The benchmark separately reports both project settings with LLVM O2. See [LLVM optimization](llvm-optimization.md) for verification and generated-code evidence.
 

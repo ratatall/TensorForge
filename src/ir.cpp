@@ -39,6 +39,33 @@ std::size_t broadcastIndex(std::size_t outputIndex, const Type &operand, const T
     }
     return operandIndex;
 }
+bool reductionType(const Type &input, std::size_t axis, Type &result) {
+    if (input.scalar() || axis >= input.shape.size())
+        return false;
+    result = input;
+    result.shape.erase(result.shape.begin() + static_cast<std::ptrdiff_t>(axis));
+    return true;
+}
+std::size_t reductionInputIndex(std::size_t outputIndex, std::size_t reductionIndex,
+                                const Type &input, std::size_t axis) {
+    Type output;
+    if (!reductionType(input, axis, output))
+        throw std::logic_error("invalid reduction shape or axis");
+    std::size_t inputIndex = 0;
+    for (std::size_t outputAxis = output.shape.size(); outputAxis-- > 0;) {
+        const auto coordinate = outputIndex % output.shape[outputAxis];
+        outputIndex /= output.shape[outputAxis];
+        const auto inputAxis = outputAxis < axis ? outputAxis : outputAxis + 1;
+        std::size_t stride = 1;
+        for (std::size_t i = inputAxis + 1; i < input.shape.size(); ++i)
+            stride *= input.shape[i];
+        inputIndex += coordinate * stride;
+    }
+    std::size_t reductionStride = 1;
+    for (std::size_t i = axis + 1; i < input.shape.size(); ++i)
+        reductionStride *= input.shape[i];
+    return inputIndex + reductionIndex * reductionStride;
+}
 namespace {
 class Analyzer {
     const Source &source_;
@@ -74,10 +101,20 @@ class Analyzer {
                                    result,
                                    {left, right},
                                    expr.location});
-                } else {
+                } else if constexpr (std::is_same_v<T, Relu>) {
                     const auto arg = expression(*node.argument);
                     return append(
                         {Opcode::Relu, module_.operations[arg].type, {arg}, expr.location});
+                } else {
+                    const auto arg = expression(*node.argument);
+                    Type result;
+                    if (!reductionType(module_.operations[arg].type, node.axis, result))
+                        source_.fail(expr.location, "sum axis " + std::to_string(node.axis) +
+                                                        " is invalid for " +
+                                                        module_.operations[arg].type.str());
+                    Operation op{Opcode::ReduceSum, result, {arg}, expr.location};
+                    op.reductionAxis = node.axis;
+                    return append(std::move(op));
                 }
             },
             expr.node);
@@ -121,6 +158,8 @@ const char *opcodeName(Opcode opcode) {
         return "multiply";
     case Opcode::Relu:
         return "relu";
+    case Opcode::ReduceSum:
+        return "reduce_sum";
     }
     throw std::logic_error("unknown IR opcode");
 }
@@ -160,6 +199,7 @@ void validateIR(const Module &module) {
         case Opcode::Add:
         case Opcode::Multiply:
         case Opcode::Relu:
+        case Opcode::ReduceSum:
             break;
         default:
             invariant(false, "unknown opcode");
@@ -168,7 +208,7 @@ void validateIR(const Module &module) {
             invariant(arg < id && module.operations[arg].alive,
                       "operand must be a live preceding definition");
         const auto arity =
-            op.opcode == Opcode::Relu
+            (op.opcode == Opcode::Relu || op.opcode == Opcode::ReduceSum)
                 ? 1U
                 : (op.opcode == Opcode::Add || op.opcode == Opcode::Multiply ? 2U : 0U);
         invariant(op.operands.size() == arity, "wrong operand count");
@@ -177,7 +217,13 @@ void validateIR(const Module &module) {
             invariant(op.type == module.inputs[op.inputIndex].type, "input type mismatch");
         } else if (op.opcode == Opcode::Constant)
             invariant(op.type.scalar(), "constant must be scalar");
-        else {
+        else if (op.opcode == Opcode::ReduceSum) {
+            Type result;
+            invariant(
+                reductionType(module.operations[op.operands[0]].type, op.reductionAxis, result),
+                "invalid reduction shape or axis");
+            invariant(result == op.type, "incorrect reduction result type");
+        } else {
             Type result;
             invariant(op.operands.empty() ||
                           broadcastTypes(module.operations[op.operands[0]].type,
@@ -190,6 +236,9 @@ void validateIR(const Module &module) {
         }
     }
     if (!module.fusedRegion.empty()) {
+        for (const auto &op : module.operations)
+            invariant(!op.alive || op.opcode != Opcode::ReduceSum,
+                      "fusion does not support reductions");
         std::vector<ValueId> expected;
         for (ValueId id = 0; id < module.operations.size(); ++id) {
             const auto &op = module.operations[id];
@@ -217,6 +266,8 @@ std::string printIR(const Module &module) {
             out << " \"" << op.name << "\" [argument " << op.inputIndex << ']';
         if (op.opcode == Opcode::Constant)
             out << ' ' << op.constant;
+        if (op.opcode == Opcode::ReduceSum)
+            out << " axis=" << op.reductionAxis;
         for (auto arg : op.operands)
             out << " %" << arg;
         out << " : " << op.type.str() << '\n';
@@ -280,6 +331,8 @@ bool fuseElementwise(Module &module) {
     // Caller runs DCE first. Fusion currently requires one common tensor shape.
     for (ValueId id = 0; id < module.operations.size(); ++id) {
         const auto &op = module.operations[id];
+        if (op.alive && op.opcode == Opcode::ReduceSum)
+            return false;
         if (op.alive && !op.type.scalar() && op.opcode != Opcode::Input) {
             if (op.type != module.operations[module.result].type)
                 return false;

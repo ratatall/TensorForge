@@ -28,6 +28,7 @@ if group == 'options':
         run(['run', source, '--llvm-opt=' + level], '--llvm-opt must be none or O2', False)
     run(['check', source, '--llvm-opt=O2'], 'inapplicable option', False)
     run(['dump-ir', source, '--trace-passes'], 'requires --opt', False)
+    run(['dump-loop-ir', root / 'examples/reduction.tf', '--opt'], 'reduction')
     run(['run', source, '--interpret', '--opt'], 'omit --opt', False)
     run(['run', source, '--interpret', '--llvm-opt=O2'], 'requires --llvm-opt=none', False)
     run(['check', root / 'nonexistent.tf'], 'cannot open', False)

@@ -77,7 +77,8 @@ std::vector<Token> lex(const Source &source) {
     };
     const std::unordered_map<std::string, TokenKind> keywords = {
         {"input", TokenKind::Input}, {"let", TokenKind::Let},       {"return", TokenKind::Return},
-        {"f32", TokenKind::F32},     {"tensor", TokenKind::Tensor}, {"relu", TokenKind::Relu}};
+        {"f32", TokenKind::F32},     {"tensor", TokenKind::Tensor}, {"relu", TokenKind::Relu},
+        {"sum", TokenKind::Sum}};
     while (pos.offset < source.text.size()) {
         const char c = peek();
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
@@ -210,6 +211,20 @@ class Parser {
             require(TokenKind::RightParen, "')'");
             return make(token.location, Relu{std::move(arg)});
         }
+        if (accept(TokenKind::Sum)) {
+            require(TokenKind::LeftParen, "'('");
+            auto arg = expression();
+            require(TokenKind::Comma, "',' before reduction axis");
+            const auto axisToken = require(TokenKind::Number, "nonnegative integer reduction axis");
+            std::size_t axis = 0;
+            const auto parsed = std::from_chars(
+                axisToken.text.data(), axisToken.text.data() + axisToken.text.size(), axis);
+            if (parsed.ec != std::errc{} ||
+                parsed.ptr != axisToken.text.data() + axisToken.text.size())
+                source_.fail(axisToken.location, "reduction axis must be a nonnegative integer");
+            require(TokenKind::RightParen, "')'");
+            return make(token.location, ReduceSum{std::move(arg), axis});
+        }
         if (accept(TokenKind::LeftParen)) {
             auto arg = expression();
             require(TokenKind::RightParen, "')'");
@@ -303,13 +318,17 @@ void dumpExpr(std::ostream &out, const Expr &expr, std::size_t indent) {
                 out << "Number " << std::setprecision(9) << node.value;
             else if constexpr (std::is_same_v<T, Binary>)
                 out << "Binary " << node.op;
-            else
+            else if constexpr (std::is_same_v<T, Relu>)
                 out << "ReLU";
+            else
+                out << "Sum axis=" << node.axis;
             out << " @" << expr.location.line << ':' << expr.location.column << '\n';
             if constexpr (std::is_same_v<T, Binary>) {
                 dumpExpr(out, *node.left, indent + 2);
                 dumpExpr(out, *node.right, indent + 2);
             } else if constexpr (std::is_same_v<T, Relu>)
+                dumpExpr(out, *node.argument, indent + 2);
+            else if constexpr (std::is_same_v<T, ReduceSum>)
                 dumpExpr(out, *node.argument, indent + 2);
         },
         expr.node);

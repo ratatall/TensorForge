@@ -6,7 +6,7 @@
 
 namespace tensorforge {
 using ValueId = std::size_t;
-enum class Opcode { Input, Constant, Add, Multiply, Relu };
+enum class Opcode { Input, Constant, Add, Multiply, Relu, ReduceSum };
 struct Operation {
     Opcode opcode;
     Type type;
@@ -15,6 +15,7 @@ struct Operation {
     float constant = 0;
     std::string name;
     std::size_t inputIndex = 0;
+    std::size_t reductionAxis = 0;
     bool alive = true;
 };
 struct InputInfo {
@@ -30,6 +31,9 @@ struct Module {
 };
 bool broadcastTypes(const Type &left, const Type &right, Type &result);
 std::size_t broadcastIndex(std::size_t outputIndex, const Type &operand, const Type &result);
+bool reductionType(const Type &input, std::size_t axis, Type &result);
+std::size_t reductionInputIndex(std::size_t outputIndex, std::size_t reductionIndex,
+                                const Type &input, std::size_t axis);
 Module analyzeAndLower(const Source &source, const Program &program);
 void validateIR(const Module &module);
 std::string printIR(const Module &module);

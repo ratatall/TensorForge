@@ -10,6 +10,7 @@ type = "f32" | "tensor" "<" positive_integer ("," positive_integer)* ">" ;
 expression = product ("+" product)* ;
 product = primary ("*" primary)* ;
 primary = ["-"] number | identifier | "relu" "(" expression ")"
+        | "sum" "(" expression "," nonnegative_integer ")"
         | "(" expression ")" ;
 ```
 
@@ -28,6 +29,8 @@ Dimensions must be integer spellings, not `4.0` or `4e0`, and each must be in `[
 | incompatible tensor shapes | incompatible tensor shapes | diagnostic |
 
 `relu` preserves its argument's type. Binary operations align tensor shapes from the trailing dimension. Two aligned dimensions are compatible when they are equal or either is 1; missing leading dimensions act as 1. For example, `tensor<2,3> + tensor<3>` produces `tensor<2,3>`, and `tensor<2,1> * tensor<1,3>` produces `tensor<2,3>`. Broadcast operands are indexed directly; no expanded tensor is allocated.
+
+`sum(value, axis)` reduces one compile-time axis in increasing index order and removes that dimension from the result type. For example, summing axis 1 of `tensor<2,3>` produces `tensor<2>`. Summing axis 0 of `tensor<4>` produces `f32`. Scalars and out-of-range axes are rejected. The compiler preserves this deterministic accumulation order and does not enable floating-point reassociation.
 
 ## Floating-point contract
 
