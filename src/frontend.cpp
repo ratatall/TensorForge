@@ -35,7 +35,23 @@ namespace tensorforge {
     throw Diagnostic(out.str());
 }
 std::string Type::str() const {
-    return scalar() ? "f32" : "tensor<" + std::to_string(extent) + "xf32>";
+    if (scalar())
+        return "f32";
+    std::ostringstream out;
+    out << "tensor<";
+    for (auto dimension : shape)
+        out << dimension << 'x';
+    out << "f32>";
+    return out.str();
+}
+std::size_t Type::elements() const {
+    std::size_t total = 1;
+    for (auto dimension : shape) {
+        if (dimension == 0 || total > MaxTensorExtent / dimension)
+            throw std::length_error("tensor shape exceeds 16777216-element limit");
+        total *= dimension;
+    }
+    return total;
 }
 namespace {
 bool digit(char c) {
@@ -124,6 +140,9 @@ std::vector<Token> lex(const Source &source) {
                 break;
             case '-':
                 kind = TokenKind::Minus;
+                break;
+            case ',':
+                kind = TokenKind::Comma;
                 break;
             case '(':
                 kind = TokenKind::LeftParen;
@@ -222,15 +241,26 @@ class Parser {
             return {};
         require(TokenKind::Tensor, "f32 or tensor type");
         require(TokenKind::Less, "'<'");
-        const auto extent = require(TokenKind::Number, "positive integer tensor extent");
-        std::size_t size = 0;
-        auto parsed =
-            std::from_chars(extent.text.data(), extent.text.data() + extent.text.size(), size);
-        if (parsed.ec != std::errc{} || parsed.ptr != extent.text.data() + extent.text.size() ||
-            size == 0 || size > MaxTensorExtent)
-            source_.fail(extent.location, "tensor extent must be an integer in [1, 16777216]");
+        Type result;
+        do {
+            const auto extent = require(TokenKind::Number, "positive integer tensor extent");
+            std::size_t size = 0;
+            auto parsed =
+                std::from_chars(extent.text.data(), extent.text.data() + extent.text.size(), size);
+            if (parsed.ec != std::errc{} || parsed.ptr != extent.text.data() + extent.text.size() ||
+                size == 0 || size > MaxTensorExtent)
+                source_.fail(extent.location, "tensor extent must be an integer in [1, 16777216]");
+            result.shape.push_back(size);
+            if (result.shape.size() > MaxTensorRank)
+                source_.fail(extent.location, "tensor rank exceeds 8");
+        } while (accept(TokenKind::Comma));
         require(TokenKind::Greater, "'>'");
-        return {size};
+        try {
+            (void)result.elements();
+        } catch (const std::length_error &) {
+            source_.fail(current().location, "tensor shape exceeds 16777216 elements");
+        }
+        return result;
     }
 
   public:

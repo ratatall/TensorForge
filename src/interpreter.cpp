@@ -66,7 +66,7 @@ Tensor interpret(const Module &module, const Inputs &inputs) {
         for (std::size_t i = 0; i < result.size(); ++i) {
             auto get = [&](std::size_t operand) {
                 const auto arg = op.operands.at(operand);
-                return values.at(arg).at(module.operations[arg].type.scalar() ? 0 : i);
+                return values.at(arg).at(broadcastIndex(i, module.operations[arg].type, op.type));
             };
             const float a = get(0);
             switch (op.opcode) {

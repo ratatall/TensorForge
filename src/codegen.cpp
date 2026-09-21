@@ -37,12 +37,13 @@ class Generator {
     llvm::Value *offset(llvm::Value *pointer, llvm::Value *index) {
         return builder_.CreateGEP(f32(), pointer, index);
     }
-    llvm::Value *operation(const Operation &op, const std::function<llvm::Value *(ValueId)> &get) {
-        auto *a = get(op.operands.at(0));
+    llvm::Value *operation(const Operation &op,
+                           const std::function<llvm::Value *(ValueId, const Type &)> &get) {
+        auto *a = get(op.operands.at(0), op.type);
         if (op.opcode == Opcode::Add)
-            return builder_.CreateFAdd(a, get(op.operands.at(1)), "add");
+            return builder_.CreateFAdd(a, get(op.operands.at(1), op.type), "add");
         if (op.opcode == Opcode::Multiply)
-            return builder_.CreateFMul(a, get(op.operands.at(1)), "multiply");
+            return builder_.CreateFMul(a, get(op.operands.at(1), op.type), "multiply");
         if (op.opcode == Opcode::Relu) {
             auto *zero = llvm::ConstantFP::get(f32(), 0.0);
             // Ordered comparison maps NaNs and both signed zeros to positive zero.
@@ -51,12 +52,36 @@ class Generator {
         }
         throw std::logic_error("codegen: unsupported computation");
     }
-    llvm::Value *load(ValueId id, llvm::Value *index) {
+    llvm::Value *load(ValueId id, llvm::Value *index, const Type &resultType) {
         if (ir_.operations[id].type.scalar())
             return scalars_.at(id);
         if (!pointers_.at(id))
             throw std::logic_error("codegen: missing tensor buffer");
-        return builder_.CreateLoad(f32(), offset(pointers_[id], index), "v" + std::to_string(id));
+        const auto &operandType = ir_.operations[id].type;
+        llvm::Value *operandIndex = index;
+        if (operandType != resultType) {
+            operandIndex = builder_.getInt64(0);
+            llvm::Value *remaining = index;
+            std::size_t operandStride = 1;
+            for (std::size_t axisOffset = 0; axisOffset < resultType.shape.size(); ++axisOffset) {
+                const auto resultAxis = resultType.shape.size() - 1 - axisOffset;
+                auto *dimension = builder_.getInt64(resultType.shape[resultAxis]);
+                auto *coordinate = builder_.CreateURem(remaining, dimension, "coordinate");
+                remaining = builder_.CreateUDiv(remaining, dimension, "remaining");
+                if (axisOffset < operandType.shape.size()) {
+                    const auto operandDimension =
+                        operandType.shape[operandType.shape.size() - 1 - axisOffset];
+                    if (operandDimension != 1) {
+                        auto *term = builder_.CreateMul(
+                            coordinate, builder_.getInt64(operandStride), "broadcast.offset");
+                        operandIndex = builder_.CreateAdd(operandIndex, term, "broadcast.index");
+                    }
+                    operandStride *= operandDimension;
+                }
+            }
+        }
+        return builder_.CreateLoad(f32(), offset(pointers_[id], operandIndex),
+                                   "v" + std::to_string(id));
     }
     void loop(std::size_t extent, const std::function<void(llvm::Value *)> &body) {
         ++stats_.loops;
@@ -124,10 +149,12 @@ class Generator {
                 else if (op.opcode == Opcode::Constant)
                     scalars_[id] = llvm::ConstantFP::get(f32(), op.constant);
                 else
-                    scalars_[id] = operation(op, [&](ValueId arg) { return scalars_.at(arg); });
+                    scalars_[id] =
+                        operation(op, [&](ValueId arg, const Type &) { return scalars_.at(arg); });
             } else if (!fused && op.opcode != Opcode::Input) {
                 loop(op.type.elements(), [&](llvm::Value *index) {
-                    auto *value = operation(op, [&](ValueId arg) { return load(arg, index); });
+                    auto *value = operation(
+                        op, [&](ValueId arg, const Type &type) { return load(arg, index, type); });
                     builder_.CreateStore(value, offset(pointers_[id], index));
                 });
             }
@@ -137,9 +164,9 @@ class Generator {
             loop(result.type.elements(), [&](llvm::Value *index) {
                 auto values = scalars_;
                 // Cache DAG values in SSA registers, including shared subexpressions.
-                auto get = [&](ValueId arg) {
+                auto get = [&](ValueId arg, const Type &type) {
                     if (!values[arg])
-                        values[arg] = load(arg, index);
+                        values[arg] = load(arg, index, type);
                     return values[arg];
                 };
                 for (auto id : ir_.fusedRegion)
@@ -150,7 +177,7 @@ class Generator {
             builder_.CreateStore(scalars_.at(ir_.result), output_);
         else if (result.opcode == Opcode::Input) {
             loop(result.type.elements(), [&](llvm::Value *index) {
-                builder_.CreateStore(load(ir_.result, index), offset(output_, index));
+                builder_.CreateStore(load(ir_.result, index, result.type), offset(output_, index));
             });
         }
         builder_.CreateRetVoid();
@@ -242,6 +269,13 @@ Executable::Executable(const Module &module, LLVMOptimization level)
 Executable::~Executable() = default;
 Executable::Executable(Executable &&) noexcept = default;
 Executable &Executable::operator=(Executable &&) noexcept = default;
+#if defined(__clang__)
+// Clang's UBSan "function" check reads type metadata immediately before an indirect
+// callee. ORC-generated functions do not carry that host-compiler metadata and may
+// begin at a page boundary, so the check itself can fault at address (kernel - 8).
+// Keep every other ASan/UBSan check active across this narrow JIT ABI boundary.
+__attribute__((no_sanitize("function")))
+#endif
 void Executable::invoke(const float *const *inputs, float *output, float *scratch) const {
     impl_->kernel(inputs, output, scratch);
 }

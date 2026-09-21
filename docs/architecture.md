@@ -29,9 +29,9 @@ The third pointer is a deliberate adjustment to the suggested two-pointer ABI. I
 
 ## Two lowerings
 
-Unfused: assign an output/scratch pointer to each live tensor computation, generate one loop per tensor operation, and load predecessor tensors from their buffers. The return computation writes directly to output; intermediate values have distinct scratch slices. A directly returned tensor input gets a copy loop. Scalars remain LLVM SSA values and are computed once, not per lane.
+Unfused: assign an output/scratch pointer to each live tensor computation, generate one flattened row-major loop per tensor operation, and load predecessor tensors from their buffers. Broadcast indices are derived from the consumer's flat index without materializing expanded tensors. The return computation writes directly to output; intermediate values have distinct scratch slices. A directly returned tensor input gets a copy loop. Scalars remain LLVM SSA values and are computed once, not per lane.
 
-Fused: consume the explicit topological schedule in one output loop. Values produced during the current lane live in an LLVM SSA cache. A shared DAG node is computed once per lane even if several users read it. Scalar computations precede the loop. Input loads are cached per lane. No tensor intermediates are materialized.
+Fused: consume the explicit topological schedule in one output loop when all tensor computations have the returned shape. Values produced during the current lane live in an LLVM SSA cache. A shared DAG node is computed once per lane even if several users read it. Scalar computations precede the loop. Broadcast input loads are indexed and cached per output lane. No tensor intermediates are materialized. Mixed-shape intermediate graphs remain on the correct unfused path rather than duplicating smaller computations.
 
 All paths use the same host target and LLVM backend `CodeGenOptLevel::Default`. The LLVM middle-end selector defaults to `none`; `O2` invokes the standard PassBuilder per-module pipeline with the host TargetMachine and registered analysis managers. LLVM performs instruction selection/register allocation and builder-level constant folding in either case. TensorForge owns the measured change in loop count and scratch traffic; it does not claim every machine-level optimization as its own.
 

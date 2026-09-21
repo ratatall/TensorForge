@@ -16,10 +16,10 @@ A `let` is a symbol-table alias for an existing value, not a copy operation. The
 
 Constant folding changes a computation into a constant at the same ID and clears its operands. DCE marks unreachable operations dead; it does not erase vector entries or renumber users. Thus IDs can have gaps in a dump. The input signature is never compacted, even when an input operation becomes dead.
 
-The verifier checks supported live opcodes, bounded extents, return validity, live backward references, operand arity, input signature types, computation result shapes, and the fusion schedule. A scheduled region must contain all live non-input tensor computations in definition order, all with the returned shape, and end at the return value. Invalid IR is an internal error, not user syntax recovery.
+The verifier checks supported live opcodes, bounded ranks and element counts, return validity, live backward references, operand arity, input signature types, broadcast-derived result shapes, and the fusion schedule. A scheduled region must contain all live non-input tensor computations in definition order, all with the returned shape, and end at the return value. Invalid IR is an internal error, not user syntax recovery.
 
 ```text
-schedule fused_elementwise [%3, %4, %5] extent=1024
+schedule fused_elementwise [%3, %4, %5] elements=1024
 ```
 
 This is an explicit lowering schedule over the existing expressions. Fusion does not replace the original arithmetic opcodes with an opaque blob. The printer exposes both the expression graph and the chosen loop region, which makes transformation tests and debugging straightforward.

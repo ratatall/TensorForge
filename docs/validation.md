@@ -1,6 +1,6 @@
 # Testing and validation
 
-Local validation used macOS 15.5 arm64, Apple Clang 17, LLVM 23.1.0, and CMake 4.4.3. All **19 CTest cases** passed in Debug, Release, and ASan/UBSan Release builds.
+Local validation used macOS 15.5 arm64, Apple Clang 17, LLVM 23.1.0, and CMake 4.4.3. The suite contains **20 CTest cases**.
 
 ## Run the tests
 
@@ -15,7 +15,7 @@ For sanitizer coverage, configure CMake with `-DTENSORFORGE_SANITIZERS=ON` and r
 
 ## Coverage
 
-The suite covers lexical analysis, parsing, semantic checks, IR verification, optimization passes, code generation, differential execution, resource limits, runtime input validation, examples, negative CLI fixtures, CLI options, and benchmark output.
+The suite covers lexical analysis, parsing, multidimensional broadcasting, semantic checks, IR verification, optimization passes, code generation, differential execution, resource limits, runtime input validation, examples, negative CLI fixtures, CLI options, and benchmark output.
 
 Differential tests perform **984 comparisons**: 60 fixed/generated graphs across four seeds and four JIT configurations, plus six shared DAGs across four configurations. Additional cases cover scalar broadcasting, dead code, constant folding, NaN/infinity/signed zero, malformed IR, overflow rejection, and mismatch diagnostics. LLVM functions and modules are verified before execution and after optional O2 optimization.
 
@@ -32,7 +32,9 @@ The mutation check works in a temporary source copy. Disabling duplicate-name re
 
 ## Sanitizer scope
 
-ASan/UBSan cover project host code, including repeated JIT construction and execution. Prebuilt LLVM and generated machine instructions are not instrumented. Apple's runtime does not support LeakSanitizer on the validated platform; Ubuntu CI requests leak detection. See [CI](ci.md) for the Linux configuration.
+ASan/UBSan cover project host code, including repeated JIT construction and execution. Prebuilt LLVM and generated machine instructions are not instrumented. The narrow indirect call into ORC code disables Clang's UBSan `function` check because that check expects host-compiler type metadata immediately before a callee; a JIT function has no such metadata and can begin at a page boundary. This is the failure mode documented in [LLVM issue 65253](https://github.com/llvm/llvm-project/issues/65253). Address checks and every other undefined-behavior check remain enabled around the boundary.
+
+Apple's runtime does not support LeakSanitizer on the validated platform; Ubuntu CI requests leak detection. See [CI](ci.md) for the Linux configuration.
 
 ## Performance evidence
 

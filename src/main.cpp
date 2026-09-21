@@ -14,7 +14,7 @@ std::uint32_t integer(const std::string &text) {
     return value;
 }
 void usage() {
-    std::cout << "TensorForge 0.1.0\n"
+    std::cout << "TensorForge 0.2.0\n"
                  "  tensorforge check FILE\n  tensorforge dump-ast FILE\n"
                  "  tensorforge dump-ir FILE [--opt] [--trace-passes]\n"
                  "  tensorforge emit-llvm FILE [--opt] [--llvm-opt=none|O2]\n"

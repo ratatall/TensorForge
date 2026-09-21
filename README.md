@@ -3,17 +3,17 @@
 A small C++20 compiler for statically shaped `f32` tensor expressions. It parses a custom language, checks shapes, builds a visible tensor IR, optimizes it, and executes real native code through LLVM ORC JIT.
 
 ```text
-input A: tensor<1024>;
-input B: tensor<1024>;
-let scaled = A * 2.0;
-return relu(scaled + B);
+input activations: tensor<32,128>;
+input bias: tensor<128>;
+return relu(activations + bias);
 ```
 
 ## At a glance
 
 - Complete **C++20 frontend → typed tensor IR → LLVM → ORC JIT** pipeline.
+- Static rank-1 through rank-8 tensors with NumPy-style trailing-dimension broadcasting.
 - **Constant folding, dead-code elimination, and elementwise fusion**, plus independently selectable LLVM O2.
-- **19 CTest cases**, including **984 differential comparisons** across four JIT configurations.
+- **20 CTest cases**, including **984 generated-graph differential comparisons** across four JIT configurations, plus multidimensional broadcast checks.
 - **2.92×** on `relu(A * 2 + B)`, N=262,144, versus **TensorForge’s unfused JIT**, with LLVM middle-end passes off; eliminated **2 MiB** of scratch. [Measured evidence](docs/benchmarking.md).
 - **macOS arm64 / LLVM 23:** locally validated. **Ubuntu CI:** workflow configured; remote run pending.
 
@@ -102,7 +102,7 @@ Sanitizers instrument TensorForge host code; the prebuilt LLVM library and gener
 
 ## Language and CLI
 
-Supported: scalar `f32` inputs and literals, rank-1 `tensor<N>` inputs, `let`, one final `return`, `+`, `*`, `relu`, parentheses, scalar broadcasting, and `//` comments. Negative numeric literals and decimal exponents are supported. All identifiers must be declared before use; tensor operands must have matching extents. A scalar return uses one output element.
+Supported: scalar `f32` inputs and literals, rank-1 through rank-8 tensors such as `tensor<2,3>`, `let`, one final `return`, `+`, `*`, `relu`, parentheses, NumPy-style trailing-dimension broadcasting, and `//` comments. Negative numeric literals and decimal exponents are supported. All identifiers must be declared before use. A scalar return uses one output element.
 
 ```bash
 build/tensorforge check examples/relu_chain.tf
@@ -172,7 +172,7 @@ module {
   %0 = input "A" [argument 0] : tensor<256xf32>
   %3 = constant 8 : f32
   %4 = multiply %0 %3 : tensor<256xf32>
-  schedule fused_elementwise [%4] extent=256
+  schedule fused_elementwise [%4] elements=256
   return %4
 }
 ```
@@ -230,7 +230,7 @@ Static shapes allow storage and loop bounds to be planned before execution. Tens
 
 ## Limits and future work
 
-Rank-1, static `f32` tensors only. No matrices, reductions, dynamic shapes, user input files, autodiff, GPU support, AOT emission, or hand-written SIMD intrinsics. There is one pure returned value and no control flow in the source language. Shapes are capped at 16,777,216 elements, expression nodes at 2,048, and nesting at 128; unoptimized scratch, generated input storage, and interpreter materializations each have a preflight 1 GiB budget. These limits are not a complete resource sandbox. LLVM 23 and macOS arm64 are the only locally validated backend/platform combination.
+Static `f32` tensors only. There are no reductions, dynamic shapes, user input files, autodiff, GPU support, AOT emission, or hand-written SIMD intrinsics. There is one pure returned value and no control flow in the source language. Rank is capped at 8 and each tensor at 16,777,216 elements; expression nodes are capped at 2,048 and nesting at 128. Unoptimized scratch, generated input storage, and interpreter materializations each have a preflight 1 GiB budget. These limits are not a complete resource sandbox. LLVM 23 is the only supported backend version.
 
 Future work includes broader platform coverage, target-aware vectorization, and analysis of register pressure on larger expression DAGs.
 

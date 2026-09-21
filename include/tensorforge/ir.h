@@ -28,6 +28,8 @@ struct Module {
     // A scheduled region: every member is evaluated once per output element.
     std::vector<ValueId> fusedRegion;
 };
+bool broadcastTypes(const Type &left, const Type &right, Type &result);
+std::size_t broadcastIndex(std::size_t outputIndex, const Type &operand, const Type &result);
 Module analyzeAndLower(const Source &source, const Program &program);
 void validateIR(const Module &module);
 std::string printIR(const Module &module);

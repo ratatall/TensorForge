@@ -9,6 +9,7 @@
 
 namespace tensorforge {
 inline constexpr std::size_t MaxTensorExtent = 16777216;
+inline constexpr std::size_t MaxTensorRank = 8;
 struct Location {
     std::size_t offset = 0, line = 1, column = 1;
 };
@@ -38,6 +39,7 @@ enum class TokenKind {
     Plus,
     Star,
     Minus,
+    Comma,
     LeftParen,
     RightParen
 };
@@ -49,10 +51,12 @@ struct Token {
 std::vector<Token> lex(const Source &source);
 
 struct Type {
-    // Extent zero denotes a scalar; tensor<1> remains a distinct type.
-    std::size_t extent = 0;
-    bool scalar() const { return extent == 0; }
-    std::size_t elements() const { return scalar() ? 1 : extent; }
+    // An empty shape denotes a scalar; tensor<1> remains a distinct type.
+    std::vector<std::size_t> shape;
+    Type() = default;
+    Type(std::initializer_list<std::size_t> dimensions) : shape(dimensions) {}
+    bool scalar() const { return shape.empty(); }
+    std::size_t elements() const;
     std::string str() const;
     bool operator==(const Type &) const = default;
 };

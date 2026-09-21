@@ -53,11 +53,11 @@ void lexerTests() {
     rejects("return 2e+;", "exponent digits");
     auto eof = lex({"empty", ""});
     expect(eof.size() == 1, "empty input lexing");
-    auto f32 = lex({"tokens", "f32 ( ) = + * : ; < >"});
+    auto f32 = lex({"tokens", "f32 ( ) = + * : ; < , >"});
     const std::vector<TokenKind> expected{
         TokenKind::F32,  TokenKind::LeftParen, TokenKind::RightParen, TokenKind::Equal,
         TokenKind::Plus, TokenKind::Star,      TokenKind::Colon,      TokenKind::Semicolon,
-        TokenKind::Less, TokenKind::Greater,   TokenKind::End};
+        TokenKind::Less, TokenKind::Comma,     TokenKind::Greater,    TokenKind::End};
     expect(f32.size() == expected.size(), "punctuation count");
     for (std::size_t i = 0; i < expected.size(); ++i)
         expect(f32[i].kind == expected[i], "punctuation kind");
@@ -87,9 +87,12 @@ void semanticTests() {
     rejects("let A = 2; input A: f32; return A;", "duplicate");
     rejects("let A = A + 1; return A;", "undeclared");
     rejects("input A: tensor<4>; input B: tensor<5>; return A + B;", "shape mismatch");
+    rejects("input A: tensor<2,3>; input B: tensor<2,2>; return A + B;", "shape mismatch");
     for (auto size : {"0", "1.5", "1e2", "16777217", "999999999999999999999999"})
         rejects("input A: tensor<" + std::string(size) + ">; return A;", "tensor extent");
     rejects("input A: tensor<-1>; return A;", "positive integer");
+    rejects("input A: tensor<4096,4097>; return A;", "shape exceeds");
+    rejects("input A: tensor<1,1,1,1,1,1,1,1,1>; return A;", "rank exceeds");
     for (const auto &expression : {"A + B", "A * 2", "2 + A", "relu(A)"}) {
         auto module = lower("input A: tensor<1>; input B: tensor<1>; return " +
                             std::string(expression) + ";");
@@ -97,6 +100,11 @@ void semanticTests() {
     }
     auto scalar = lower("input s: f32; return s * 2;");
     expect(scalar.operations[scalar.result].type.scalar(), "scalar input type");
+    auto matrix = lower("input A: tensor<2,3>; input B: tensor<3>; return A+B;");
+    expect(matrix.operations[matrix.result].type == Type({2, 3}),
+           "trailing-dimension broadcasting");
+    auto outer = lower("input A: tensor<2,1>; input B: tensor<1,3>; return A*B;");
+    expect(outer.operations[outer.result].type == Type({2, 3}), "two-axis broadcasting");
 }
 void irTests() {
     auto module = lower("input A: tensor<4>; return A * 2;");
@@ -240,7 +248,8 @@ void resourceTests() {
     throwsWith<Diagnostic>(
         [] { lower("input x: f32;\nreturn missing;"); },
         "test.tf:2:8: error: undeclared identifier 'missing'\nreturn missing;\n       ^");
-    expect(lower("input x: tensor<16777216>; return x;").inputs[0].type.extent == MaxTensorExtent,
+    expect(lower("input x: tensor<16777216>; return x;").inputs[0].type.shape ==
+               std::vector<std::size_t>{MaxTensorExtent},
            "max legal extent frontend");
     rejects("input x: tensor<18446744073709551616>; return x;", "tensor extent");
     lower("return " + std::string(127, '(') + "1" + std::string(127, ')') + ";");
@@ -266,8 +275,8 @@ void resourceTests() {
     invalid.operations[0].opcode = static_cast<Opcode>(99);
     throwsWith<std::logic_error>([&] { validateIR(invalid); }, "unknown opcode");
     invalid = base;
-    invalid.inputs[0].type.extent = std::numeric_limits<std::size_t>::max();
-    throwsWith<std::logic_error>([&] { validateIR(invalid); }, "extent exceeds");
+    invalid.inputs[0].type.shape = {std::numeric_limits<std::size_t>::max()};
+    throwsWith<std::logic_error>([&] { validateIR(invalid); }, "shape exceeds");
     invalid = base;
     invalid.result = 100;
     throwsWith<std::logic_error>([&] { validateIR(invalid); }, "return value");
@@ -312,6 +321,22 @@ void runtimeTests() {
     expect(generateInputs(m, 42) != generateInputs(m, 43), "different seeds");
     Inputs known{{-2, 0, 1, 2}, {2}};
     expect(interpret(m, known) == Tensor({-2, 2, 4, 6}), "runtime expected values and order");
+    auto matrix = lower("input A: tensor<2,3>; input row: tensor<3>; return A+row;");
+    Inputs matrixInputs{{1, 2, 3, 4, 5, 6}, {10, 20, 30}};
+    expect(interpret(matrix, matrixInputs) == Tensor({11, 22, 33, 14, 25, 36}),
+           "row broadcast oracle");
+    checkBoth(matrix, matrixInputs);
+    auto mixed =
+        lower("input A: tensor<2,3>; input row: tensor<3>; let scaled=row*2; return A+scaled;");
+    auto mixedOptimized = mixed;
+    PassManager().run(mixedOptimized);
+    expect(mixedOptimized.fusedRegion.empty(), "mixed-shape graph stays unfused");
+    checkBoth(mixed, matrixInputs);
+    auto outer = lower("input column: tensor<2,1>; input row: tensor<1,3>; return column*row;");
+    Inputs outerInputs{{2, 4}, {10, 20, 30}};
+    expect(interpret(outer, outerInputs) == Tensor({20, 40, 60, 40, 80, 120}),
+           "multi-axis broadcast oracle");
+    checkBoth(outer, outerInputs);
     throwsWith<std::invalid_argument>([&] { interpret(m, {}); }, "input count");
     throwsWith<std::invalid_argument>([&] { Executable(m).run({{1}, {2}}); }, "input shape");
     throwsWith<std::invalid_argument>([&] { interpret(m, {{1, 2, 3, 4}, {}}); }, "input shape");

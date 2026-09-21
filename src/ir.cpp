@@ -1,10 +1,44 @@
 #include "tensorforge/ir.h"
+#include <algorithm>
 #include <cmath>
 #include <iomanip>
 #include <sstream>
 #include <unordered_map>
 
 namespace tensorforge {
+bool broadcastTypes(const Type &left, const Type &right, Type &result) {
+    const auto rank = std::max(left.shape.size(), right.shape.size());
+    result.shape.assign(rank, 1);
+    for (std::size_t offset = 0; offset < rank; ++offset) {
+        const auto leftDimension =
+            offset < left.shape.size() ? left.shape[left.shape.size() - 1 - offset] : 1;
+        const auto rightDimension =
+            offset < right.shape.size() ? right.shape[right.shape.size() - 1 - offset] : 1;
+        if (leftDimension != rightDimension && leftDimension != 1 && rightDimension != 1)
+            return false;
+        result.shape[rank - 1 - offset] = std::max(leftDimension, rightDimension);
+    }
+    return true;
+}
+std::size_t broadcastIndex(std::size_t outputIndex, const Type &operand, const Type &result) {
+    if (operand.scalar())
+        return 0;
+    if (operand.shape.size() > result.shape.size())
+        throw std::logic_error("broadcast operand rank exceeds result rank");
+    std::size_t operandIndex = 0, operandStride = 1;
+    for (std::size_t offset = 0; offset < result.shape.size(); ++offset) {
+        const auto resultAxis = result.shape.size() - 1 - offset;
+        const auto coordinate = outputIndex % result.shape[resultAxis];
+        outputIndex /= result.shape[resultAxis];
+        if (offset < operand.shape.size()) {
+            const auto operandDimension = operand.shape[operand.shape.size() - 1 - offset];
+            if (operandDimension != 1)
+                operandIndex += coordinate * operandStride;
+            operandStride *= operandDimension;
+        }
+    }
+    return operandIndex;
+}
 namespace {
 class Analyzer {
     const Source &source_;
@@ -32,11 +66,12 @@ class Analyzer {
                     const auto left = expression(*node.left), right = expression(*node.right);
                     const auto a = module_.operations[left].type,
                                b = module_.operations[right].type;
-                    if (!a.scalar() && !b.scalar() && a != b)
+                    Type result;
+                    if (!broadcastTypes(a, b, result))
                         source_.fail(expr.location,
                                      "shape mismatch: " + a.str() + " versus " + b.str());
                     return append({node.op == '+' ? Opcode::Add : Opcode::Multiply,
-                                   a.scalar() ? b : a,
+                                   result,
                                    {left, right},
                                    expr.location});
                 } else {
@@ -100,13 +135,25 @@ void validateIR(const Module &module) {
     };
     invariant(module.result < module.operations.size(), "return value out of range");
     invariant(module.operations[module.result].alive, "return value is dead");
+    auto validType = [](const Type &type) {
+        if (type.shape.size() > MaxTensorRank)
+            return false;
+        std::size_t elements = 1;
+        for (auto dimension : type.shape) {
+            if (dimension == 0 || dimension > MaxTensorExtent ||
+                elements > MaxTensorExtent / dimension)
+                return false;
+            elements *= dimension;
+        }
+        return true;
+    };
     for (const auto &input : module.inputs)
-        invariant(input.type.extent <= MaxTensorExtent, "input extent exceeds limit");
+        invariant(validType(input.type), "input shape exceeds limit");
     for (ValueId id = 0; id < module.operations.size(); ++id) {
         const auto &op = module.operations[id];
         if (!op.alive)
             continue;
-        invariant(op.type.extent <= MaxTensorExtent, "result extent exceeds limit");
+        invariant(validType(op.type), "result shape exceeds limit");
         switch (op.opcode) {
         case Opcode::Input:
         case Opcode::Constant:
@@ -132,13 +179,13 @@ void validateIR(const Module &module) {
             invariant(op.type.scalar(), "constant must be scalar");
         else {
             Type result;
-            for (auto arg : op.operands) {
-                const auto type = module.operations[arg].type;
-                invariant(result.scalar() || type.scalar() || result == type,
-                          "operand shape mismatch");
-                if (!type.scalar())
-                    result = type;
-            }
+            invariant(op.operands.empty() ||
+                          broadcastTypes(module.operations[op.operands[0]].type,
+                                         op.opcode == Opcode::Relu
+                                             ? module.operations[op.operands[0]].type
+                                             : module.operations[op.operands[1]].type,
+                                         result),
+                      "operand shape mismatch");
             invariant(result == op.type, "incorrect result type");
         }
     }
@@ -178,7 +225,7 @@ std::string printIR(const Module &module) {
         out << "  schedule fused_elementwise [";
         for (std::size_t i = 0; i < module.fusedRegion.size(); ++i)
             out << (i ? ", " : "") << '%' << module.fusedRegion[i];
-        out << "] extent=" << module.operations[module.result].type.extent << '\n';
+        out << "] elements=" << module.operations[module.result].type.elements() << '\n';
     }
     out << "  return %" << module.result << "\n}\n";
     return out.str();
@@ -230,7 +277,7 @@ bool eliminateDeadCode(Module &module) {
 bool fuseElementwise(Module &module) {
     validateIR(module);
     std::vector<ValueId> region;
-    // Caller runs DCE first. A live rank-1 elementwise graph has one extent.
+    // Caller runs DCE first. Fusion currently requires one common tensor shape.
     for (ValueId id = 0; id < module.operations.size(); ++id) {
         const auto &op = module.operations[id];
         if (op.alive && !op.type.scalar() && op.opcode != Opcode::Input) {
